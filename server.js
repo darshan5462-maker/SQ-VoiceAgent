@@ -12,7 +12,7 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 if (!GEMINI_API_KEY) { console.error('❌ Missing GEMINI_API_KEY'); process.exit(1); }
 
 // Gemini model and base URL
-const GEMINI_MODEL   = 'gemini-2.0-flash';
+const GEMINI_MODEL   = 'gemini-1.5-flash';
 const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
 /* ═══════════════════════════════════════════════════════════════════════
@@ -1157,6 +1157,17 @@ app.post('/api/chat', async (req, res) => {
     console.error('[/api/chat] Error:', err.message, err.stack?.slice(0, 400));
     res.status(500).json({ error: err.message });
   }
+});
+
+/* ═══════════════════════════════════════════════════════════════════════
+   REALTIME TOKEN — stub route (OpenAI Realtime replaced by Gemini chat)
+   Returns JSON so the frontend doesn't crash with "Unexpected token '<'"
+═══════════════════════════════════════════════════════════════════════ */
+app.post('/api/realtime-token', (req, res) => {
+  res.status(410).json({
+    error: 'Voice/Realtime mode is not available with Gemini. Please use the text chat interface (/api/chat).',
+    hint:  'The WebRTC realtime feature was OpenAI-only. Use the chat UI instead.'
+  });
 });
 
 /* ═══════════════════════════════════════════════════════════════════════
