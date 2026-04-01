@@ -12,7 +12,7 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 if (!GEMINI_API_KEY) { console.error('❌ Missing GEMINI_API_KEY'); process.exit(1); }
 
 // Gemini model and base URL
-const GEMINI_MODEL   = 'gemini-1.5-flash';
+const GEMINI_MODEL   = 'gemini-1.5-flash-latest';
 const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
 /* ═══════════════════════════════════════════════════════════════════════
@@ -1185,7 +1185,18 @@ app.post('/api/tool-call', async (req, res) => {
 /* ═══════════════════════════════════════════════════════════════════════
    MISC ROUTES
 ═══════════════════════════════════════════════════════════════════════ */
-app.get('/api/test-sms', async (req, res) => {
+app.get('/api/list-models', async (req, res) => {
+  try {
+    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${GEMINI_API_KEY}`);
+    const data = await r.json();
+    const models = (data.models || [])
+      .filter(m => (m.supportedGenerationMethods || []).includes('generateContent'))
+      .map(m => m.name);
+    res.json({ available_for_generateContent: models, raw: data });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+ async (req, res) => {
   const phone = req.query.phone;
   if (!phone) return res.json({ error: 'Pass ?phone=9876543210' });
   const result = await sendNotification({ to: phone, message: 'ShadowQuant Smart Clinic: This is a test SMS.' });
