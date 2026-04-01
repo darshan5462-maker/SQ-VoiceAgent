@@ -11,6 +11,10 @@ app.use(express.static(path.join(__dirname, 'public')));
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 if (!GEMINI_API_KEY) { console.error('❌ Missing GEMINI_API_KEY'); process.exit(1); }
 
+// Gemini model and base URL
+const GEMINI_MODEL   = 'gemini-2.0-flash';
+const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+
 /* ═══════════════════════════════════════════════════════════════════════
    KARNATAKA HEALTHCARE DATABASE  —  District-wise
    Covers 15+ districts, 30+ hospitals, 15+ clinics
@@ -618,7 +622,7 @@ function searchHospitals({ district, specialty, name, type, keyword }) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
-   STATE + NOTIFICATIONS + EMERGENCY (same as before, compacted)
+   STATE + NOTIFICATIONS + EMERGENCY
 ═══════════════════════════════════════════════════════════════════════ */
 const bookings=[], escalations=[], emergencies=[];
 
@@ -633,15 +637,11 @@ async function sendNotification({to, message}) {
     return r;
   }
 
-  /* ── Twilio (free trial $15, works immediately) ── */
+  /* ── Twilio ── */
   if (process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_FROM_NUMBER) {
     try {
       const creds  = Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString('base64');
-      const body   = new URLSearchParams({
-        To:   phoneE164,
-        From: process.env.TWILIO_FROM_NUMBER,
-        Body: message
-      });
+      const body   = new URLSearchParams({ To: phoneE164, From: process.env.TWILIO_FROM_NUMBER, Body: message });
       const resp = await fetch(
         `https://api.twilio.com/2010-04-01/Accounts/${process.env.TWILIO_ACCOUNT_SID}/Messages.json`,
         { method:'POST', headers:{ 'Authorization':`Basic ${creds}`, 'Content-Type':'application/x-www-form-urlencoded' }, body }
@@ -658,7 +658,7 @@ async function sendNotification({to, message}) {
     } catch(e) { r.twilio_exception = e.message; }
   }
 
-  /* ── Fast2SMS (needs ₹100 recharge) ── */
+  /* ── Fast2SMS ── */
   if (process.env.FAST2SMS_API_KEY) {
     try {
       const resp = await fetch('https://www.fast2sms.com/dev/bulkV2', {
@@ -667,7 +667,6 @@ async function sendNotification({to, message}) {
         body: JSON.stringify({ route:'q', message, language:'english', flash:0, numbers:phone10 })
       });
       const data = await resp.json();
-      console.log('[SMS] Fast2SMS response:', JSON.stringify(data));
       if (data.return === true) {
         r.sms = 'sent'; r.provider = 'fast2sms';
         console.log(`[SMS] ✅ Fast2SMS → ${phone10}`);
@@ -679,14 +678,13 @@ async function sendNotification({to, message}) {
     } catch(e) { r.fast2sms_exception = e.message; }
   }
 
-  /* ── No provider worked ── */
   if (!r.sms) {
     console.log(`[SMS] No provider worked. Message for ${phone10}:\n${message}`);
     r.logged = true;
   }
   return r;
 }
-/* First-aid survival instructions per symptom type */
+
 function getFirstAidInstructions(symptoms) {
   const s = (symptoms||'').toLowerCase();
   if (s.includes('heart attack') || s.includes('chest pain') || s.includes('chest tightness')) {
@@ -792,7 +790,6 @@ function getFirstAidInstructions(symptoms) {
       do_not: ['Do NOT induce vomiting', 'Do NOT give milk or water without medical advice']
     };
   }
-  // Default — general emergency
   return {
     condition: 'Medical Emergency',
     steps: [
@@ -833,7 +830,6 @@ async function dispatchEmergency({lat, lng, address, patientName, phone, symptom
   };
   emergencies.push(emergency);
 
-  // Alert message for clinic staff / emergency contact
   const alertMsg = [
     `🚨 EMERGENCY ALERT — ${emergencyId}`,
     `Patient: ${emergency.patient}`,
@@ -850,12 +846,10 @@ async function dispatchEmergency({lat, lng, address, patientName, phone, symptom
 
   console.error('\n' + '='.repeat(70) + '\n' + alertMsg + '\n' + '='.repeat(70) + '\n');
 
-  // Notify emergency contact / clinic
   if (process.env.CLINIC_EMERGENCY_PHONE) {
     await sendNotification({ to: process.env.CLINIC_EMERGENCY_PHONE, message: alertMsg });
   }
 
-  // Notify patient with first aid steps + map link
   if (phone && phone !== 'N/A') {
     const patientMsg = [
       `🚨 ShadowQuant Emergency Response`,
@@ -971,23 +965,29 @@ async function executeTool(name, args) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
-   FUNCTION DEFINITIONS
+   GEMINI FUNCTION DECLARATIONS
+   (Gemini uses "parameters" with JSON Schema — same as OpenAI, but
+   wrapped inside functionDeclarations inside a "tools" array)
 ═══════════════════════════════════════════════════════════════════════ */
-const FUNCTIONS=[
-  {name:'search_hospitals',description:'Search hospitals and clinics across Karnataka by district, specialty, doctor name, or keyword. Use for ANY query about hospitals, doctors, or medical services in Karnataka.',parameters:{type:'object',properties:{district:{type:'string',description:'Karnataka district: Bengaluru, Mysuru, Shivamogga, Mangaluru, Hubballi, Belagavi, Kalaburagi, Davangere, Hassan, Ballari, Raichur, Udupi, Bidar, Vijayapura, Kodagu, Chitradurga, Tumakuru'},specialty:{type:'string',description:'Medical specialty: Cardiology, Neurology, Orthopaedics, Gynaecology, Paediatrics, Oncology, General Medicine, Dental, ENT, etc.'},hospital_name:{type:'string'},facility_type:{type:'string',description:'government, private, teaching, super-specialty, clinic'},keyword:{type:'string'}}}},
-  {name:'get_hospital_details',description:'Get full details of a specific hospital.',parameters:{type:'object',properties:{hospital_id:{type:'string'},hospital_name:{type:'string'}}}},
-  {name:'list_districts',description:'List all Karnataka districts with hospital data.',parameters:{type:'object',properties:{dummy:{type:'string',description:'Not needed, pass empty string'}}}},
-  {name:'assess_urgency',description:'Assess urgency of patient symptoms. ALWAYS call first when patient describes any medical problem.',parameters:{type:'object',properties:{symptoms:{type:'string'}},required:['symptoms']}},
-  {name:'trigger_emergency',description:'IMMEDIATELY dispatch emergency services when urgency is CRITICAL. Do NOT wait for confirmation.',parameters:{type:'object',properties:{patient_name:{type:'string'},phone:{type:'string'},symptoms:{type:'string'},lat:{type:'number'},lng:{type:'number'},address:{type:'string'},session_id:{type:'string'}},required:['symptoms']}},
-  {name:'book_appointment',description:'Book a medical appointment at any Karnataka hospital. Collect: patient name, phone, hospital, doctor, day, time, specialty.',parameters:{type:'object',properties:{patient_name:{type:'string'},phone:{type:'string'},hospital_name:{type:'string'},doctor_name:{type:'string'},specialty:{type:'string'},day:{type:'string'},time:{type:'string'},urgency:{type:'string',enum:['routine','high','critical']}},required:['patient_name','hospital_name','day','specialty']}},
-  {name:'send_booking_notification',description:'Send SMS confirmation to patient.',parameters:{type:'object',properties:{ref:{type:'string'},phone:{type:'string'}},required:['ref']}},
-  {name:'cancel_appointment',description:'Cancel an existing appointment.',parameters:{type:'object',properties:{ref:{type:'string'}},required:['ref']}}
+const GEMINI_TOOLS = [
+  {
+    functionDeclarations: [
+      {name:'search_hospitals',description:'Search hospitals and clinics across Karnataka by district, specialty, doctor name, or keyword.',parameters:{type:'OBJECT',properties:{district:{type:'STRING',description:'Karnataka district name'},specialty:{type:'STRING',description:'Medical specialty'},hospital_name:{type:'STRING'},facility_type:{type:'STRING'},keyword:{type:'STRING'}}}},
+      {name:'get_hospital_details',description:'Get full details of a specific hospital.',parameters:{type:'OBJECT',properties:{hospital_id:{type:'STRING'},hospital_name:{type:'STRING'}}}},
+      {name:'list_districts',description:'List all Karnataka districts with hospital data.',parameters:{type:'OBJECT',properties:{dummy:{type:'STRING'}}}},
+      {name:'assess_urgency',description:'Assess urgency of patient symptoms. ALWAYS call first when patient describes any medical problem.',parameters:{type:'OBJECT',properties:{symptoms:{type:'STRING',description:'Patient symptoms description'}},required:['symptoms']}},
+      {name:'trigger_emergency',description:'IMMEDIATELY dispatch emergency services when urgency is CRITICAL.',parameters:{type:'OBJECT',properties:{patient_name:{type:'STRING'},phone:{type:'STRING'},symptoms:{type:'STRING'},lat:{type:'NUMBER'},lng:{type:'NUMBER'},address:{type:'STRING'},session_id:{type:'STRING'}},required:['symptoms']}},
+      {name:'book_appointment',description:'Book a medical appointment at any Karnataka hospital.',parameters:{type:'OBJECT',properties:{patient_name:{type:'STRING'},phone:{type:'STRING'},hospital_name:{type:'STRING'},doctor_name:{type:'STRING'},specialty:{type:'STRING'},day:{type:'STRING'},time:{type:'STRING'},urgency:{type:'STRING',enum:['routine','high','critical']}},required:['patient_name','hospital_name','day','specialty']}},
+      {name:'send_booking_notification',description:'Send SMS confirmation to patient.',parameters:{type:'OBJECT',properties:{ref:{type:'STRING'},phone:{type:'STRING'}},required:['ref']}},
+      {name:'cancel_appointment',description:'Cancel an existing appointment.',parameters:{type:'OBJECT',properties:{ref:{type:'STRING'}},required:['ref']}}
+    ]
+  }
 ];
 
 /* ═══════════════════════════════════════════════════════════════════════
    SYSTEM PROMPT
 ═══════════════════════════════════════════════════════════════════════ */
-const SYSTEM_PROMPT=`You are Aria, the AI health assistant for ShadowQuant Smart Clinic — Karnataka's comprehensive healthcare navigation system covering hospitals and clinics across all districts.
+const SYSTEM_PROMPT = `You are Aria, the AI health assistant for ShadowQuant Smart Clinic — Karnataka's comprehensive healthcare navigation system covering hospitals and clinics across all districts.
 
 LANGUAGE RULE (STRICT — 3 LANGUAGES ONLY):
 - Detect language from patient's FIRST message.
@@ -996,145 +996,153 @@ LANGUAGE RULE (STRICT — 3 LANGUAGES ONLY):
 - Kannada script or Kannada words → respond in Kannada (ಕನ್ನಡ).
 - Hindi / Devanagari → respond in Hindi (हिंदी).
 - All other cases → respond in English.
-- If unsure, default to English.
 
 SCOPE — You cover ALL districts of Karnataka:
 Bengaluru, Mysuru, Shivamogga, Mangaluru (Dakshina Kannada), Hubballi-Dharwad, Belagavi, Kalaburagi, Tumakuru, Davangere, Hassan, Ballari, Raichur, Udupi/Manipal, Bidar, Vijayapura, Kodagu, Chitradurga.
 
-WHAT YOU CAN HELP WITH:
-1. Best hospitals or clinics in any Karnataka district
-2. Finding specialists (cardiologist, neurologist, orthopaedic surgeon, etc.)
-3. Government vs private hospital comparison with costs
-4. Doctor details — names, qualifications, experience, specialties
-5. Hospital addresses, phone numbers, OPD timings, facilities
-6. Booking appointments at any listed hospital
-7. Emergency guidance and ambulance dispatch
-8. General health advice and specialist recommendations
-
 EMERGENCY PROTOCOL (HIGHEST PRIORITY):
 When urgency is CRITICAL — do ALL of these simultaneously:
 1. Call trigger_emergency immediately — do NOT wait for permission
-2. While the tool runs, SPEAK these words IMMEDIATELY:
-   "I am alerting emergency services to your location right now. Stay on the line with me."
-3. After trigger_emergency returns, READ OUT the first_aid steps clearly and slowly:
-   "While help is on the way, here is what you must do right now: [read steps one by one]"
+2. Speak immediately: "I am alerting emergency services to your location right now. Stay on the line with me."
+3. After trigger_emergency returns, READ OUT the first_aid steps clearly and slowly.
 4. Tell them: "Help is coming. Call 108 directly as backup. I am staying with you."
-5. Keep talking to them — do NOT end the conversation
 
 WORKFLOW (non-emergency):
-1. Listen carefully to the patient's query.
-2. Symptoms described → call assess_urgency FIRST.
-3. Critical urgency → EMERGENCY PROTOCOL above.
-4. Hospital query → call search_hospitals with district and/or specialty.
-5. Present top 2–3 results: hospital name, address, key doctors, phone, timings.
-6. For government hospitals: mention free/subsidised care.
-7. Offer to book an appointment.
-8. Collect phone number before booking (for confirmation).
+1. Symptoms described → call assess_urgency FIRST.
+2. Critical urgency → EMERGENCY PROTOCOL above.
+3. Hospital query → call search_hospitals with district and/or specialty.
+4. Present top 2–3 results: hospital name, address, key doctors, phone, timings.
+5. Offer to book an appointment. Collect phone before booking.
 
 IMPORTANT NUMBERS: Emergency Ambulance: 108 | Karnataka Health Helpline: 104
-
-VOICE RULES:
-- Short natural sentences. No markdown in speech.
-- NEVER claim action without calling tool first.
-- Mention accreditation (NABH/JCI) for private hospitals when relevant.
-- For government hospitals, emphasise free services.
 
 Today: ${new Date().toLocaleDateString('en-IN',{weekday:'long',year:'numeric',month:'long',day:'numeric'})}.`;
 
 /* ═══════════════════════════════════════════════════════════════════════
-   ROUTES
+   HELPER — convert OpenAI-style message history to Gemini format
+   Gemini uses: { role: 'user'|'model', parts: [{text}] }
+   Tool calls:  role:'model' parts:[{functionCall:{name,args}}]
+   Tool result: role:'user'  parts:[{functionResponse:{name,response}}]
 ═══════════════════════════════════════════════════════════════════════ */
-app.post('/api/realtime-token', async (req,res) => {
-  try {
-    const r=await fetch('https://api.openai.com/v1/realtime/sessions',{method:'POST',headers:{'Authorization':`Bearer ${OPENAI_API_KEY}`,'Content-Type':'application/json'},body:JSON.stringify({model:'gpt-4o-realtime-preview-2024-12-17',voice:'alloy',instructions:SYSTEM_PROMPT,tools:FUNCTIONS.map(f=>({type:'function',name:f.name,description:f.description,parameters:f.parameters})),tool_choice:'auto',input_audio_transcription:{model:'whisper-1'},turn_detection:{type:'server_vad',threshold:0.5,prefix_padding_ms:300,silence_duration_ms:500}})});
-    if (!r.ok){const e=await r.json();return res.status(r.status).json({error:e.error?.message||'Session failed'});}
-    const session=await r.json();
-    console.log('[Realtime] Session:',session.id);
-    res.json({client_secret:session.client_secret,session_id:session.id});
-  } catch(e){res.status(500).json({error:e.message});}
-});
+function toGeminiHistory(messages) {
+  const geminiMessages = [];
+  for (const m of messages) {
+    if (m.role === 'system') continue; // handled via systemInstruction
 
-app.post('/api/tool-call', async (req,res) => {
-  const {name,arguments:argsStr}=req.body;
-  let args={};
-  try{args=typeof argsStr==='string'?JSON.parse(argsStr):(argsStr||{});}catch(e){}
-  console.log(`[Tool] ${name}`,JSON.stringify(args).slice(0,120));
-  const result=await executeTool(name,args);
-  res.json(result);
-});
+    if (m.role === 'assistant' || m.role === 'model') {
+      // May contain tool calls
+      if (m.tool_calls && m.tool_calls.length > 0) {
+        geminiMessages.push({
+          role: 'model',
+          parts: m.tool_calls.map(tc => ({
+            functionCall: {
+              name: tc.function.name,
+              args: JSON.parse(tc.function.arguments || '{}')
+            }
+          }))
+        });
+      } else {
+        geminiMessages.push({ role: 'model', parts: [{ text: m.content || '' }] });
+      }
+    } else if (m.role === 'tool') {
+      // Tool result — must pair with a preceding functionCall
+      let result;
+      try { result = JSON.parse(m.content); } catch { result = { text: m.content }; }
+      geminiMessages.push({
+        role: 'user',
+        parts: [{ functionResponse: { name: m.name || 'tool', response: result } }]
+      });
+    } else {
+      // user
+      geminiMessages.push({ role: 'user', parts: [{ text: m.content || '' }] });
+    }
+  }
+  return geminiMessages;
+}
 
+/* ═══════════════════════════════════════════════════════════════════════
+   /api/chat  — Gemini generateContent with function calling loop
+═══════════════════════════════════════════════════════════════════════ */
 app.post('/api/chat', async (req, res) => {
   const { messages } = req.body;
   if (!messages || !Array.isArray(messages))
     return res.status(400).json({ error: 'messages array required' });
 
   try {
-    // Convert FUNCTIONS → OpenAI tools format (function_call is deprecated)
-    const tools = FUNCTIONS.map(f => ({
-      type: 'function',
-      function: { name: f.name, description: f.description, parameters: f.parameters }
-    }));
-
+    // Keep a mutable OpenAI-style history (easier for callers to manage)
     let history   = [...messages];
     let finalText = '';
     let toolCalls = [];
     let loops     = 0;
 
     while (loops++ < 10) {
+      // Build Gemini request body
       const payload = {
-        model:       'gpt-4o',
-        messages:    [{ role: 'system', content: SYSTEM_PROMPT }, ...history],
-        tools,
-        tool_choice: 'auto',
-        max_tokens:  600,
-        temperature: 0.4
+        system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
+        contents:           toGeminiHistory(history),
+        tools:              GEMINI_TOOLS,
+        generationConfig: {
+          temperature:     0.4,
+          maxOutputTokens: 600
+        }
       };
 
-      const r = await fetch('https://api.openai.com/v1/chat/completions', {
+      const r = await fetch(GEMINI_API_URL, {
         method:  'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${OPENAI_API_KEY}` },
+        headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify(payload)
       });
 
       if (!r.ok) {
         const errBody = await r.json().catch(() => ({}));
-        const msg = errBody?.error?.message || `OpenAI HTTP ${r.status}`;
-        console.error('[/api/chat] OpenAI error:', msg);
+        const msg = errBody?.error?.message || `Gemini HTTP ${r.status}`;
+        console.error('[/api/chat] Gemini error:', msg);
         return res.status(502).json({ error: msg });
       }
 
-      const data  = await r.json();
-      const msg   = data.choices?.[0]?.message;
-      if (!msg) {
-        console.error('[/api/chat] Unexpected response:', JSON.stringify(data).slice(0, 300));
-        return res.status(502).json({ error: 'Unexpected OpenAI response' });
+      const data = await r.json();
+      const candidate = data.candidates?.[0];
+      if (!candidate) {
+        console.error('[/api/chat] No candidate:', JSON.stringify(data).slice(0, 300));
+        return res.status(502).json({ error: 'Unexpected Gemini response' });
       }
 
-      history.push(msg);
+      const parts = candidate.content?.parts || [];
 
-      // Handle tool calls (new format)
-      if (msg.tool_calls && msg.tool_calls.length > 0) {
-        for (const tc of msg.tool_calls) {
-          const name = tc.function.name;
-          let args   = {};
-          try { args = JSON.parse(tc.function.arguments); } catch(e) {}
+      // Check if any part is a function call
+      const fnParts = parts.filter(p => p.functionCall);
 
+      if (fnParts.length > 0) {
+        // Add model turn (with function calls) to history
+        history.push({
+          role:       'assistant',
+          content:    null,
+          tool_calls: fnParts.map((p, i) => ({
+            id:       `call_${Date.now()}_${i}`,
+            type:     'function',
+            function: { name: p.functionCall.name, arguments: JSON.stringify(p.functionCall.args || {}) }
+          }))
+        });
+
+        // Execute each function call and add results to history
+        for (let i = 0; i < fnParts.length; i++) {
+          const { name, args } = fnParts[i].functionCall;
           console.log(`[Tool] ${name}`, JSON.stringify(args).slice(0, 100));
-          const result = await executeTool(name, args);
+          const result = await executeTool(name, args || {});
           toolCalls.push({ tool: name, args, result });
 
-          // Tool result message (new format)
           history.push({
-            role:         'tool',
-            tool_call_id: tc.id,
-            content:      JSON.stringify(result)
+            role:    'tool',
+            name,                          // Gemini needs the name here
+            tool_call_id: `call_${Date.now()}_${i}`,
+            content: JSON.stringify(result)
           });
         }
-        continue; // loop back to get model's next response
+        continue; // loop back — ask Gemini to continue
       }
 
-      // Plain text response — done
-      finalText = msg.content || '';
+      // Plain text response
+      finalText = parts.map(p => p.text || '').join('');
       break;
     }
 
@@ -1142,102 +1150,85 @@ app.post('/api/chat', async (req, res) => {
       reply:          finalText,
       tool_calls:     toolCalls,
       bookings_count: bookings.length,
-      messages:       history.filter(m => m.role !== 'system')
+      messages:       history
     });
 
   } catch (err) {
-    console.error('[/api/chat] Caught error:', err.message, err.stack?.slice(0, 400));
+    console.error('[/api/chat] Error:', err.message, err.stack?.slice(0, 400));
     res.status(500).json({ error: err.message });
   }
 });
 
+/* ═══════════════════════════════════════════════════════════════════════
+   TOOL CALL PROXY (used by browser-side realtime clients, if any)
+═══════════════════════════════════════════════════════════════════════ */
+app.post('/api/tool-call', async (req, res) => {
+  const { name, arguments: argsStr } = req.body;
+  let args = {};
+  try { args = typeof argsStr === 'string' ? JSON.parse(argsStr) : (argsStr || {}); } catch(e) {}
+  console.log(`[Tool] ${name}`, JSON.stringify(args).slice(0, 120));
+  const result = await executeTool(name, args);
+  res.json(result);
+});
 
-
-/* SMS TEST — call this to test SMS directly */
+/* ═══════════════════════════════════════════════════════════════════════
+   MISC ROUTES
+═══════════════════════════════════════════════════════════════════════ */
 app.get('/api/test-sms', async (req, res) => {
   const phone = req.query.phone;
   if (!phone) return res.json({ error: 'Pass ?phone=9876543210' });
-
-  const result = await sendNotification({
-    to: phone,
-    message: 'ShadowQuant Smart Clinic: This is a test SMS. If you received this, SMS is working correctly.'
-  });
-
-  res.json({
-    phone_received: phone,
-    phone_cleaned:  phone.replace(/\D/g,'').slice(-10),
-    twilio_set:     !!process.env.TWILIO_ACCOUNT_SID,
-    fast2sms_set:   !!process.env.FAST2SMS_API_KEY,
-    result
-  });
+  const result = await sendNotification({ to: phone, message: 'ShadowQuant Smart Clinic: This is a test SMS.' });
+  res.json({ phone_received: phone, twilio_set: !!process.env.TWILIO_ACCOUNT_SID, fast2sms_set: !!process.env.FAST2SMS_API_KEY, result });
 });
 
-
-/* SMS emergency contact when emergency triggered from browser */
 app.post('/api/emergency-contact-sms', async (req, res) => {
   const { contact_phone, contact_name, patient_name, patient_phone, symptoms, location, emergency_id } = req.body;
   if (!contact_phone) return res.status(400).json({ error: 'contact_phone required' });
-
-  const msg = [
-    `🚨 EMERGENCY ALERT — ${emergency_id}`,
-    ``,
-    `${patient_name} needs immediate help.`,
-    `Symptoms: ${symptoms}`,
-    ``,
-    `📍 Location: ${location}`,
-    `📞 Patient phone: ${patient_phone}`,
-    ``,
-    `Emergency services (108) have been alerted.`,
-    `Please call ${patient_name} immediately.`,
-    ``,
-    `— ShadowQuant Smart Clinic`
-  ].join('\n');
-
-  console.log(`[EmgContact] Sending SMS to ${contact_name} (${contact_phone})`);
+  const msg = [`🚨 EMERGENCY ALERT — ${emergency_id}`,``,`${patient_name} needs immediate help.`,`Symptoms: ${symptoms}`,``,`📍 Location: ${location}`,`📞 Patient phone: ${patient_phone}`,``,`Emergency services (108) have been alerted.`,`Please call ${patient_name} immediately.`,``,`— ShadowQuant Smart Clinic`].join('\n');
   const result = await sendNotification({ to: contact_phone, message: msg });
   res.json({ status: 'sent', contact: contact_name, result });
 });
 
-/* DEBUG — test OpenAI connection and see exact error */
 app.get('/api/debug', async (req, res) => {
-  const results = { key_set: !!OPENAI_API_KEY, key_prefix: OPENAI_API_KEY?.slice(0,12) };
+  const results = { key_set: !!GEMINI_API_KEY, key_prefix: GEMINI_API_KEY?.slice(0, 8) + '...' };
   try {
-    const r = await fetch('https://api.openai.com/v1/chat/completions', {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${OPENAI_API_KEY}` },
-      body: JSON.stringify({
-        model:      'gpt-4o',
-        messages:   [{ role: 'user', content: 'Reply with just the word OK' }],
-        max_tokens: 5
-      })
+    const r = await fetch(GEMINI_API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'Reply with just the word OK' }] }], generationConfig: { maxOutputTokens: 5 } })
     });
     const data = await r.json();
-    results.openai_status  = r.status;
-    results.openai_ok      = r.ok;
-    results.openai_reply   = data.choices?.[0]?.message?.content;
-    results.openai_error   = data.error?.message;
-    results.raw            = data;
-  } catch(e) {
-    results.fetch_error = e.message;
-  }
+    results.gemini_status = r.status;
+    results.gemini_ok     = r.ok;
+    results.gemini_reply  = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    results.gemini_error  = data.error?.message;
+  } catch(e) { results.fetch_error = e.message; }
   res.json(results);
 });
 
-app.get('/api/health',(req,res)=>res.json({status:'ok',agent:'Aria',system:'ShadowQuant Smart Clinic — Karnataka',districts:Object.keys(KARNATAKA_HOSPITALS).length,total_hospitals:Object.values(KARNATAKA_HOSPITALS).reduce((a,d)=>a+(d.hospitals||[]).length,0),total_clinics:Object.values(KARNATAKA_HOSPITALS).reduce((a,d)=>a+(d.clinics||[]).length,0),model:'gpt-4o-realtime',notifications:{twilio:!!process.env.TWILIO_ACCOUNT_SID, fast2sms:!!process.env.FAST2SMS_API_KEY}}));
-app.get('/api/districts',(req,res)=>res.json(Object.values(KARNATAKA_HOSPITALS).map(d=>({name:d.district,hospitals:(d.hospitals||[]).length,clinics:(d.clinics||[]).length}))));
-app.get('/api/hospitals',(req,res)=>res.json(searchHospitals({district:req.query.district,specialty:req.query.specialty})));
-app.get('/api/bookings',(req,res)=>res.json(bookings));
-app.get('/api/emergencies',(req,res)=>res.json(emergencies));
+app.get('/api/health', (req, res) => res.json({
+  status: 'ok', agent: 'Aria', system: 'ShadowQuant Smart Clinic — Karnataka',
+  ai_provider: 'Google Gemini', model: GEMINI_MODEL,
+  districts: Object.keys(KARNATAKA_HOSPITALS).length,
+  total_hospitals: Object.values(KARNATAKA_HOSPITALS).reduce((a,d)=>a+(d.hospitals||[]).length,0),
+  total_clinics:   Object.values(KARNATAKA_HOSPITALS).reduce((a,d)=>a+(d.clinics||[]).length,0),
+  notifications: { twilio: !!process.env.TWILIO_ACCOUNT_SID, fast2sms: !!process.env.FAST2SMS_API_KEY }
+}));
 
-const PORT=process.env.PORT||3000;
-app.listen(PORT,()=>{
-  const h=Object.values(KARNATAKA_HOSPITALS).reduce((a,d)=>a+(d.hospitals||[]).length,0);
-  const c=Object.values(KARNATAKA_HOSPITALS).reduce((a,d)=>a+(d.clinics||[]).length,0);
-  console.log(`✅  ShadowQuant Smart Clinic — Aria`);
+app.get('/api/districts',   (req, res) => res.json(Object.values(KARNATAKA_HOSPITALS).map(d=>({name:d.district,hospitals:(d.hospitals||[]).length,clinics:(d.clinics||[]).length}))));
+app.get('/api/hospitals',   (req, res) => res.json(searchHospitals({district:req.query.district, specialty:req.query.specialty})));
+app.get('/api/bookings',    (req, res) => res.json(bookings));
+app.get('/api/emergencies', (req, res) => res.json(emergencies));
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  const h = Object.values(KARNATAKA_HOSPITALS).reduce((a,d)=>a+(d.hospitals||[]).length,0);
+  const c = Object.values(KARNATAKA_HOSPITALS).reduce((a,d)=>a+(d.clinics||[]).length,0);
+  console.log(`✅  ShadowQuant Smart Clinic — Aria (Gemini Edition)`);
   console.log(`🌐  http://localhost:${PORT}`);
+  console.log(`🤖  AI Provider: Google Gemini (${GEMINI_MODEL})`);
   console.log(`🗺️   Karnataka Districts: ${Object.keys(KARNATAKA_HOSPITALS).length}`);
   console.log(`🏥  Hospitals: ${h} | Clinics: ${c}`);
-  console.log(`🎙️   Realtime API WebRTC: ready`);
   console.log(`📱  Twilio SMS:  ${process.env.TWILIO_ACCOUNT_SID?'✅':'— Set TWILIO_ACCOUNT_SID + TWILIO_AUTH_TOKEN + TWILIO_FROM_NUMBER'}`);
-  console.log(`📱  Fast2SMS:    ${process.env.FAST2SMS_API_KEY?'✅':'— Set FAST2SMS_API_KEY (needs ₹100 recharge)'}`);
+  console.log(`📱  Fast2SMS:    ${process.env.FAST2SMS_API_KEY?'✅':'— Set FAST2SMS_API_KEY'}`);
 });
